@@ -8,7 +8,6 @@
 #   PERF_DURATION     measured run, seconds        (default 30)
 #   PERF_WARMUP       warmup run, seconds          (default 5)
 #   PERF_CONNECTIONS  concurrent connections       (default 100)
-#   PERF_SERVER_CPUS  taskset cpu list for server  (default: unpinned)
 #   PERF_CLIENT_CPUS  taskset cpu list for oha     (default: unpinned)
 #   PERF_PORT         server port                  (default 8080)
 set -euo pipefail
@@ -24,25 +23,42 @@ WARMUP="${PERF_WARMUP:-5}"
 CONNS="${PERF_CONNECTIONS:-100}"
 PORT="${PERF_PORT:-8080}"
 
-pin() { # pin <cpus> <cmd...>
-    local cpus="$1"; shift
-    if [ -n "$cpus" ]; then taskset -c "$cpus" "$@"; else "$@"; fi
+# The server is not pinned here: its worker threads pin themselves to
+# CPUs 0..N-1 (see thread_main in src_c), which overrides any taskset mask.
+client() {
+    if [ -n "${PERF_CLIENT_CPUS:-}" ]; then
+        taskset -c "$PERF_CLIENT_CPUS" oha "$@"
+    else
+        oha "$@"
+    fi
 }
 
 cd "$DIR"
-pin "${PERF_SERVER_CPUS:-}" ./server > server.log 2>&1 &
+
+# Servers bind with SO_REUSEPORT, so a leftover one would silently share the load.
+if curl -s -o /dev/null "http://localhost:$PORT/"; then
+    echo "port $PORT is already serving; stop the other server first" >&2
+    exit 1
+fi
+
+# Launched directly (no wrapper function/subshell) so that $! is the server
+# itself and the EXIT trap really stops it. Per-request logs go to stdout
+# and would grow by hundreds of MB, so only stderr is kept.
+./server > /dev/null 2> server.log &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null || true; wait $SERVER_PID 2>/dev/null || true' EXIT
 
+ready=0
 for _ in $(seq 1 50); do
-    if curl -fs "http://localhost:$PORT/" > /dev/null; then break; fi
-    kill -0 "$SERVER_PID" 2>/dev/null || { echo "server died:"; cat server.log; exit 1; }
+    if curl -fs -o /dev/null "http://localhost:$PORT/"; then ready=1; break; fi
+    kill -0 "$SERVER_PID" 2>/dev/null || { echo "server died:" >&2; cat server.log >&2; exit 1; }
     sleep 0.2
 done
+[ "$ready" = 1 ] || { echo "server did not become ready" >&2; cat server.log >&2; exit 1; }
 
 URL="http://localhost:$PORT$PATH_"
-pin "${PERF_CLIENT_CPUS:-}" oha -z "${WARMUP}s" -c "$CONNS" --no-tui "$URL" > /dev/null 2>&1
-pin "${PERF_CLIENT_CPUS:-}" oha -z "${DURATION}s" -c "$CONNS" --no-tui \
+client -z "${WARMUP}s" -c "$CONNS" --no-tui "$URL" > /dev/null 2>&1
+client -z "${DURATION}s" -c "$CONNS" --no-tui \
     --output-format json "$URL" > oha.json
 
 jq '{rps: .summary.requestsPerSec,

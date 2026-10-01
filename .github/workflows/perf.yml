@@ -73,15 +73,9 @@ jobs:
           pixi run build
 
       - name: Benchmark base
-        env:
-          PERF_SERVER_CPUS: "0,1"
-          PERF_CLIENT_CPUS: "2,3"
         run: head/scripts/perf_bench.sh base base.json
 
       - name: Benchmark head
-        env:
-          PERF_SERVER_CPUS: "0,1"
-          PERF_CLIENT_CPUS: "2,3"
         run: head/scripts/perf_bench.sh head head.json
 
       - name: Compare and report
